@@ -2,3 +2,5 @@
     remote = storage
 ['remote "storage"']
     url = s3://acs-kaggle
+['remote "titanic"']
+    url = s3://acs-kaggle/titanic
