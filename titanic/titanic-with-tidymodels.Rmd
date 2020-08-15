@@ -1,0 +1,408 @@
+---
+title: "Titanic with TidyModels"
+author: "Andrew Stewart"
+date: "7/23/2020"
+output: html_document
+---
+
+I've been following the development of `tidymodels` for awhile now, anxious to modernize some of my old `caret` workflows with a tidy touch.  I've worked with a few of the packages, but let's put the whole thing together and do an end-to-end modeling workflow with the titanic dataset.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(here)
+library(ggplot2)
+library(DataExplorer)
+```
+
+## Competition
+
+```{r}
+titanic <- kgl_competitions_list(search = "titanic")
+kgl_competitions_data_list(titanic$id)
+```
+
+
+## Dataset
+
+The following comes the dataset description on Kaggle.
+
+### Overview
+
+The data has been split into two groups:
+
+    training set (train.csv)
+    test set (test.csv)
+
+The training set should be used to build your machine learning models. For the training set, we provide the outcome (also known as the “ground truth”) for each passenger. Your model will be based on “features” like passengers’ gender and class. You can also use feature engineering to create new features.
+
+The test set should be used to see how well your model performs on unseen data. For the test set, we do not provide the ground truth for each passenger. It is your job to predict these outcomes. For each passenger in the test set, use the model you trained to predict whether or not they survived the sinking of the Titanic.
+
+We also include gender_submission.csv, a set of predictions that assume all and only female passengers survive, as an example of what a submission file should look like.
+
+### Data Dictionary
+
+| Variable | Definition	         | Key                                            |
++----------|---------------------|------------------------------------------------|
+|survival  | Survival 	         | 0 = No, 1 = Yes                                |
+|pclass 	 | Ticket class 	     | 1 = 1st, 2 = 2nd, 3 = 3rd                      |
+|sex 	     | Sex 	               |                                                |
+|Age 	     | Age in years 	     |                                                |
+|sibsp 	   | # of siblings / spouses aboard the Titanic |                         |
+|parch 	   | # of parents / children aboard the Titanic |                         |	
+|ticket    | Ticket number 	     |                                                |
+|fare 	   | Passenger fare      |                                                |
+|cabin 	   | Cabin number 	     |                                                |
+|embarked  | Port of Embarkation | C = Cherbourg, Q = Queenstown, S = Southampton |
+
+### Variable Notes
+
+`pclass`: A proxy for socio-economic status (SES)
+
+- 1st = Upper
+- 2nd = Middle
+- 3rd = Lower
+
+`age`: Age is fractional if less than 1. If the age is estimated, is it in the form of xx.5
+
+`sibsp`: The dataset defines family relations in this way...
+
+- Sibling = brother, sister, stepbrother, stepsister
+- Spouse = husband, wife (mistresses and fiancés were ignored)
+
+`parch`: The dataset defines family relations in this way...
+
+- Parent = mother, father
+- Child = daughter, son, stepdaughter, stepson
+- Some children travelled only with a nanny, therefore parch=0 for them.
+
+```{r}
+train <- read_csv(here("titanic/data/train.csv"),
+                  col_types = cols(
+                    PassengerId = col_double(),
+                    Survived = col_double(),
+                    Pclass = col_double(),
+                    Name = col_character(),
+                    Sex = col_character(),
+                    Age = col_double(),
+                    SibSp = col_double(),
+                    Parch = col_double(),
+                    Ticket = col_character(),
+                    Fare = col_double(),
+                    Cabin = col_character(),
+                    Embarked = col_character()
+                  )) %>% 
+  clean_names() %>%
+  mutate(survived = as.factor(survived)) %>%
+  select(-name)
+
+test <- read_csv(here("titanic/data/test.csv"),
+                 col_types = cols(
+                    PassengerId = col_double(),
+                    Pclass = col_double(),
+                    Name = col_character(),
+                    Sex = col_character(),
+                    Age = col_double(),
+                    SibSp = col_double(),
+                    Parch = col_double(),
+                    Ticket = col_character(),
+                    Fare = col_double(),
+                    Cabin = col_character(),
+                    Embarked = col_character()
+                  )) %>% 
+  clean_names()
+
+gender_submission <- read_csv(here("titanic/data/gender_submission.csv"),
+                              col_types = cols(
+                                PassengerId = col_double(),
+                                Survived = col_character()
+                              )) %>% 
+  clean_names()
+
+skim(train)
+skim(test)
+skim(gender_submission)
+```
+
+
+## EDA 
+
+```{r}
+plot_str(train)
+```
+
+This is a pretty visual, though I'm not entirely sure how useful it is on a raw dataframe without embedded hierarchical information. 
+
+```{r}
+plot_missing(train)
+```
+
+That's quite a bit of missing data for `cabin`.  I don't recall the exact details behind this dataset, but I imagine this is due to cabin numbers only being registered for the upper class passengers, while those in the lower decks likely weren't bothered with such cataloging. It may be best to simply represent missing cabin data as its own category rather than attempt to infer any inputation.
+
+There is a decent amount of `age` data missing as well, which is understandable for the time period in which the data was recorded. It may be useful to impute missing ages based on other variables, but it may also be useful to (simultaneously) note which passengers had this missing data as well. 
+
+It's entirely possible that passengers with missing data are more likely to have not survived.
+
+```{r}
+plot_histogram(train)
+```
+
+
+
+```{r}
+plot_density(train)
+```
+
+```{r}
+plot_correlation(train, 
+                 type='continuous','survived', 
+                 cor_args = list("use" = "na.or.complete")) # remove na's
+```
+
+```{r}
+plot_bar(train)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+create_report(train,
+              output_file = here("eda.html"),
+              output_dir = here("titanic/"))
+```
+
+
+## Sampling
+
+```{r}
+train_test_split <-
+  rsample::initial_split(
+    data = train,     
+    prop = 0.80   
+  ) 
+
+train_tbl <- train_test_split %>% training() 
+test_tbl  <- train_test_split %>% testing()
+
+train_tbl %>% tabyl(survived)
+test_tbl %>% tabyl(survived)
+```
+
+## Transformations
+
+```{r}
+recipe_rf <- function(dataset) {
+  recipe(y ~ ., data = dataset) %>%
+    # step_nzv(all_numeric()) %>%
+    step_center(all_numeric()) %>%
+    step_scale(all_numeric()) %>%
+    # step_mutate_at(all_numeric(), fn = ~replace_na(., 0)) %>%
+  prep(data = dataset)
+}
+```
+
+
+```{r}
+rf_recipe <- recipe(survived ~ pclass + sex + age + sib_sp + parch + fare  + embarked, 
+                    data = train_tbl) %>%
+  # step_knnimpute(all_predictors(), neighbors = 3) %>%
+  # step_bagimpute(all_predictors()) %>%
+  # step_unknown(all_nominal()) %>%
+  # step_unknown(cabin, new_level = "unknown cabin") %>%
+  step_unknown(embarked, new_level = "unknown") %>%
+  # step_unknown(cabin, new_level = "unknown cabin") %>%
+  step_meanimpute(all_numeric()) %>%
+  # step_nzv() %>%
+  step_center(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes())
+  # step_mutate_at(all_numeric(), fn = ~replace_na(., 0))
+
+summary(rf_recipe)
+```
+
+  
+```{r}
+rf <- rand_forest(trees=100, mode="classification") %>%
+  set_engine("ranger", importance = 'impurity', keep.inbag=TRUE ) 
+```
+
+
+```{r wflow}
+rf_wflow <- workflow() %>% 
+  add_recipe(rf_recipe) %>% 
+  add_model(rf)
+
+rf_wflow_fit <- rf_wflow %>% 
+  # add_formula(survived ~ .) %>%
+  fit(data = train_tbl)
+
+rf_wflow_fit
+```
+
+
+```{r}
+rf_wflow_fit$fit$fit$fit$variable.importance %>% 
+  tidy() %>%
+  dplyr::arrange(desc(x)) %>%
+  # dplyr::top_n(25) %>%
+  ggplot(aes(reorder(names, x), x)) +
+  geom_col() +
+  coord_flip() +
+  ggtitle("Variable importance")
+```
+
+```{r}
+ggsave(filename = here("titanic/plots/varimp.png"))
+```
+
+
+```{r}
+predict(rf_wflow_fit, test_tbl) %>%
+  bind_cols(survived = test_tbl$survived) %>%
+  tabyl(.pred_class, survived)
+```
+
+```{r}
+predict(rf_wflow_fit, test_tbl) %>%
+  bind_cols(survived = test_tbl$survived) %>%
+  metrics(truth = survived, estimate = .pred_class)
+```
+
+```{r}
+test_probs <- rf_wflow_fit %>%
+  predict(test_tbl, type="prob") %>%
+  bind_cols(survived = test_tbl$survived)
+glimpse(test_probs)
+```
+
+```{r}
+rf_wflow_fit %>%
+  predict(test_tbl) %>%
+  bind_cols(survived = test_tbl$survived) %>%
+  conf_mat(survived, .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+```{r}
+ggsave(here("titanic/plots/confmat.png"))
+```
+
+
+```{r}
+test_probs %>%
+  gain_curve(survived, .pred_0) %>%
+  autoplot()
+```
+
+```{r}
+ggsave(filename = here("titanic/plots/gain.png"))
+```
+
+
+```{r}
+test_probs %>%
+  roc_curve(survived, .pred_0) %>%
+  autoplot()
+```
+
+```{r}
+ggsave(filename = here("titanic/plots/roc.png"))
+```
+
+
+```{r}
+rf_wflow_fit %>%
+  predict(test_tbl) %>%
+  bind_cols(survived = test_tbl$survived) %>%
+  conf_mat(survived, .pred_class) %>%
+  summary() %>%
+  select(-.estimator) %>% 
+  deframe() %>% 
+  as.list() -> metrics
+```
+
+
+```{r}
+rf_wflow_fit %>%
+  write_rds(here("titanic/models/ranger1.rds"))
+```
+
+
+## Publish
+
+```{r}
+rf_wflow_fit %>%
+  predict(test) %>%
+  bind_cols(passenger_id = test$passenger_id) %>%
+  select(PassengerId = passenger_id,
+         Survived = .pred_class) %>%
+  write_csv(here("titanic/data/submission.csv"))
+```
+
+```{zsh}
+kaggle competitions submit -f ./titanic/data/submission.csv -m "Example" titanic
+```
+
+
+```{r}
+kgl_competitions_submissions_url(here("titanic/data/submission.csv"))
+
+kgl_competitions_submissions_upload(
+  file = here("titanic/data/submission.csv"),
+  guid = 'titanic'
+)
+
+kgl_competitions_submissions_submit(here("titanic/data/submission.csv"), 
+                                    id = 'titanic',
+                                    submissionDescription = "Test submission")
+```
+
+```{r}
+library(neptune)
+reticulate::use_condaenv("base")
+init_neptune(project_name = 'andrewcstewart/kaggle')
+
+create_experiment(name = glue::glue("Titanic {lubridate::today()}"))
+
+append_tag(c("titanic"))
+set_property(property = 'algorithm', value = 'ranger')
+
+log_metric('accuracy', metrics$accuracy)
+log_metric('precision', metrics$precision)
+log_metric('recall', metrics$recall)
+log_metric('sens', metrics$sens)
+log_metric('spec', metrics$spec)
+log_metric('ppv', metrics$ppv)
+log_metric('npv', metrics$npv)
+log_metric('bal_accuracy', metrics$bal_accuracy)
+log_metric('detection_prevalence', metrics$detection_prevalence)
+
+log_image(name = "confusion matrix", filename=here("titanic/plots/confmat.png"))
+log_image(name = "roc curve", filename=here("titanic/plots/roc.png"))
+log_image(name = "gain curve", filename=here("titanic/plots/gain.png"))
+log_image(name = "variable importance", filename=here("titanic/plots/varimp.png"))
+
+stop_experiment()
+```
+
+
+```{zsh}
+dvc add data/submission.csv
+dvc add models/ranger1.rds
+dvc push -R -r titanic ./data ./models
+```
+
+```{zsh}
+git add data/submission.csv.dvc data/.gitignore
+git add models/ranger1.rds.dvc models/.gitignore
+```
+
+
+## Session info
+
+```{r session}
+Sys.time()
+git2r::repository()
+sessionInfo()
+```
